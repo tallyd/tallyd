@@ -297,34 +297,34 @@ func (a *slowAdapter) snapshot() (calls, maxConcurrent int, sizes []int) {
 	return a.sendCalls, a.maxConcurrent, append([]int(nil), a.batchSizes...)
 }
 
-// TestNoConcurrentSendsForSameProvider answers a specific question about
-// the design: if 100 events arrive while a send to the provider is
-// already in flight, does a second request go out at the same time? No —
-// the Batcher's single run() goroutine calls flush() synchronously, so it
-// structurally cannot start a second Send until the first returns. The
-// 100 events queue up in the channel buffer and, once the first Send
-// completes, get coalesced into one subsequent batch — never sent
-// concurrently, and never sent one-by-one either.
-func TestNoConcurrentSendsForSameProvider(t *testing.T) {
-	// linger triggers the first (lone) flush; maxBatch is comfortably
-	// above 100 so the second flush coalesces all 100 queued events into
-	// a single batch rather than triggering on size.
-	ad := &slowAdapter{maxBatch: 200, sendDelay: 150 * time.Millisecond}
+// TestConcurrentSendsAreBounded answers a specific question about the
+// design: if many events arrive while sends to a provider are already in
+// flight, does the Batcher pipeline multiple requests concurrently
+// instead of serializing behind one slow provider response? Yes, but not
+// unbounded — up to defaultMaxInFlight requests can be in flight to one
+// provider at once; a saturated provider back-pressures further sends
+// rather than piling on unlimited concurrent requests.
+//
+// maxBatch=1 means every event becomes its own single-event flush, so the
+// number of concurrent Send calls is determined purely by the
+// concurrency limit, not by incidental batch-vs-linger timing.
+func TestConcurrentSendsAreBounded(t *testing.T) {
+	const wantMaxInFlight = 4 // must match batcher.defaultMaxInFlight
+	const n = 12
+
+	ad := &slowAdapter{maxBatch: 1, sendDelay: 50 * time.Millisecond}
 	acker := &fakeAcker{}
 	dlq := &fakeDLQ{}
 
-	b := batcher.New("orb", ad, 20*time.Millisecond, acker, dlq, batcher.RetryPolicy{})
+	b := batcher.New("orb", ad, time.Hour, acker, dlq, batcher.RetryPolicy{})
 	defer b.Close()
 
-	b.Enqueue(testEvent("evt-0"))
-	time.Sleep(40 * time.Millisecond) // let the linger-triggered first Send actually start
-
-	for i := 1; i <= 100; i++ {
+	for i := 0; i < n; i++ {
 		b.Enqueue(testEvent(fmt.Sprintf("evt-%d", i)))
 	}
 
 	waitFor(t, 3*time.Second, func() bool {
-		for i := 1; i <= 100; i++ {
+		for i := 0; i < n; i++ {
 			if _, ok := acker.find(fmt.Sprintf("evt-%d", i)); !ok {
 				return false
 			}
@@ -333,16 +333,52 @@ func TestNoConcurrentSendsForSameProvider(t *testing.T) {
 	})
 
 	calls, maxConcurrent, sizes := ad.snapshot()
-	if maxConcurrent != 1 {
-		t.Errorf("max concurrent Send calls = %d, want 1 (no concurrent sends to the same provider)", maxConcurrent)
+	if calls != n {
+		t.Errorf("Send called %d time(s), want %d (one per single-event batch)", calls, n)
 	}
-	if calls != 2 {
-		t.Errorf("Send called %d time(s), want exactly 2 (the lone kickoff event, then all 100 queued-while-busy events coalesced into one batch)", calls)
+	for _, size := range sizes {
+		if size != 1 {
+			t.Errorf("batch size = %d, want 1 for every call (maxBatch=1)", size)
+		}
 	}
-	if len(sizes) == 2 && sizes[1] != 100 {
-		t.Errorf("second Send batch size = %d, want 100 (all events queued while the first Send was in flight)", sizes[1])
+	if maxConcurrent <= 1 {
+		t.Errorf("max concurrent Send calls = %d, want > 1 (sends should overlap, not serialize behind one slow request)", maxConcurrent)
 	}
-	t.Logf("Send call batch sizes: %v", sizes)
+	if maxConcurrent > wantMaxInFlight {
+		t.Errorf("max concurrent Send calls = %d, want <= %d (concurrency must stay bounded)", maxConcurrent, wantMaxInFlight)
+	}
+	t.Logf("max concurrent Send calls: %d", maxConcurrent)
+}
+
+// TestCloseWaitsForConcurrentInFlightFlushes guards the specific risk
+// introduced by making flush() concurrent: Close() must wait for every
+// in-flight Send, not just the run() loop's own exit, or a graceful
+// shutdown could return while sends are still running — and the caller
+// (pipeline.Close) would then close the DLQ/WAL out from under them.
+func TestCloseWaitsForConcurrentInFlightFlushes(t *testing.T) {
+	ad := &slowAdapter{maxBatch: 1, sendDelay: 100 * time.Millisecond}
+	acker := &fakeAcker{}
+	dlq := &fakeDLQ{}
+
+	b := batcher.New("orb", ad, time.Hour, acker, dlq, batcher.RetryPolicy{})
+
+	// Enqueue exactly enough to saturate the concurrency limit, so all of
+	// them are genuinely in flight (not just queued) at the moment Close
+	// is called.
+	const n = 4
+	for i := 0; i < n; i++ {
+		b.Enqueue(testEvent(fmt.Sprintf("evt-%d", i)))
+	}
+	time.Sleep(10 * time.Millisecond) // let all n sends actually start
+
+	b.Close() // must block until all n in-flight 100ms sends complete
+
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("evt-%d", i)
+		if _, ok := acker.find(id); !ok {
+			t.Errorf("%s not acked by the time Close() returned", id)
+		}
+	}
 }
 
 func TestRetryBudgetExhaustion(t *testing.T) {

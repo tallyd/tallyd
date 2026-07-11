@@ -77,9 +77,19 @@ type queued struct {
 	firstQueue time.Time
 }
 
+// defaultMaxInFlight caps how many Send calls can run concurrently for a
+// single provider. Bounded rather than unbounded: an unlimited number of
+// concurrent requests to a provider that's already struggling usually
+// makes things worse, not better. Not yet configurable — a fixed default
+// for this first cut; a config knob can follow if a provider needs
+// something different.
+const defaultMaxInFlight = 4
+
 // Batcher is the per-provider queue + flush + retry engine. Network
 // coalescing only: raw events reach the provider intact, batching never
-// aggregates them.
+// aggregates them. Up to defaultMaxInFlight batches can be in flight to
+// the provider at once, so one slow request no longer holds up everything
+// queued behind it — see flush() and the semaphore in run().
 type Batcher struct {
 	Provider string
 	Adapter  adapter.Adapter
@@ -91,7 +101,8 @@ type Batcher struct {
 
 	in      chan queued
 	closeCh chan struct{}
-	wg      sync.WaitGroup
+	wg      sync.WaitGroup // the run() loop
+	flushWG sync.WaitGroup // every in-flight flush() goroutine
 }
 
 // New creates and starts a Batcher for one provider.
@@ -128,14 +139,20 @@ func (b *Batcher) enqueue(q queued) {
 }
 
 // Close stops accepting new work, flushes whatever is already queued, and
-// waits for the flush loop to exit. In-flight retries scheduled via
-// time.AfterFunc that fire after Close has returned are dropped rather
-// than delivered — acceptable because the event remains pending in the
-// WAL and will be redelivered on the next process start via
-// dispatcher.ReplayPending.
+// waits for every in-flight flush — not just the queue loop — to finish
+// before returning. That second wait matters now that flushes run
+// concurrently: without it, Close() could return while a Send is still
+// running, and the caller (pipeline.Close) would go on to close the DLQ
+// and WAL out from under it.
+//
+// In-flight retries scheduled via time.AfterFunc that fire after Close
+// has returned are dropped rather than delivered — acceptable because
+// the event remains pending in the WAL and will be redelivered on the
+// next process start via dispatcher.ReplayPending.
 func (b *Batcher) Close() {
 	close(b.closeCh)
 	b.wg.Wait()
+	b.flushWG.Wait()
 }
 
 func (b *Batcher) run() {
@@ -146,6 +163,13 @@ func (b *Batcher) run() {
 		maxBatch = 500
 	}
 
+	// sem bounds how many flush() calls run concurrently. Acquiring a
+	// slot here (in run(), not inside the spawned goroutine) means a
+	// saturated provider naturally back-pressures new flushes rather than
+	// spawning unbounded goroutines — run() simply blocks accepting new
+	// batches until a slot frees up.
+	sem := make(chan struct{}, defaultMaxInFlight)
+
 	var pending []queued
 	timer := time.NewTimer(b.Linger)
 	defer timer.Stop()
@@ -154,8 +178,16 @@ func (b *Batcher) run() {
 		if len(pending) == 0 {
 			return
 		}
-		b.flush(pending)
+		batch := pending
 		pending = nil
+
+		sem <- struct{}{}
+		b.flushWG.Add(1)
+		go func() {
+			defer b.flushWG.Done()
+			defer func() { <-sem }()
+			b.flush(batch)
+		}()
 	}
 
 	for {

@@ -78,6 +78,23 @@ past that window risks double-counting, so exhausted retries dead-letter
 instead of looping forever), and DLQ handoff. A slow/down provider only
 backs up its own queue, never a healthy one's.
 
+**Up to `defaultMaxInFlight` (4) sends run concurrently per provider,
+bounded, not unbounded**: `run()`'s single goroutine still owns `pending`
+and the linger timer, but `flush()` spawns each Send as its own goroutine
+gated by a semaphore, so a slow provider response no longer blocks
+everything queued behind it — `run()` keeps accumulating and dispatching
+new batches while earlier ones are still in flight, up to the concurrency
+cap; beyond that, acquiring the semaphore slot blocks `run()` itself,
+which is the intended back-pressure (never spawn unbounded concurrent
+requests at a struggling provider). Verified against a real slow HTTP
+endpoint: 12 events produced exactly 3 waves of 4 concurrent requests,
+not 12 serial ones. This is precisely why `Batcher.Close()` needs a
+*second* wait group (`flushWG`, alongside `wg` for the `run()` loop
+itself) — without it, `Close()` could return while sends spawned during
+shutdown are still running, and the caller (`pipeline.Close`) would go on
+to close the DLQ/WAL out from under them. Not yet configurable per
+provider; a fixed default for this first cut.
+
 **Structural typing keeps packages decoupled**: `receiver`, `batcher`, and
 `dispatcher` never import `internal/wal`, `internal/dlq`, or
 `internal/metrics` directly (dispatcher imports `wal` only for the
