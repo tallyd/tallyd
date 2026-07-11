@@ -29,12 +29,19 @@ type Router interface {
 	Route(event adapter.Event) []string
 }
 
+// MetricsRecorder is optional; a nil Metrics field records nothing.
+// *metrics.Metrics satisfies this structurally.
+type MetricsRecorder interface {
+	RecordEventsReceived(n int)
+}
+
 // Receiver handles POST /v1/events: validate, enrich, hand off to the
 // durable Sink, and only then ack the caller with 2xx.
 type Receiver struct {
-	Sink   Sink
-	Router Router
-	Now    func() time.Time // overridable for tests
+	Sink    Sink
+	Router  Router
+	Metrics MetricsRecorder  // optional
+	Now     func() time.Time // overridable for tests
 }
 
 // New returns a Receiver ready to be mounted as an http.Handler.
@@ -84,6 +91,9 @@ func (r *Receiver) handleEvents(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	if r.Metrics != nil {
+		r.Metrics.RecordEventsReceived(len(events))
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 

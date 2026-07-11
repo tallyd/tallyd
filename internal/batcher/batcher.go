@@ -27,6 +27,14 @@ type DeadLetterSink interface {
 	Put(provider string, event adapter.Event, reason string) error
 }
 
+// MetricsRecorder is optional; a nil Metrics field records nothing.
+// *metrics.Metrics satisfies this structurally.
+type MetricsRecorder interface {
+	ObserveFlushLatency(provider string, d time.Duration)
+	RecordAck(provider string, disposition adapter.Disposition)
+	RecordSendError(provider string, disposition adapter.Disposition)
+}
+
 // RetryPolicy controls exponential backoff + jitter, and caps total retry
 // duration below the provider's dedup window (see ARCHITECTURE.md
 // "Delivery guarantees") so a redelivered event can never double-count.
@@ -79,6 +87,7 @@ type Batcher struct {
 	Acker    Acker
 	DLQ      DeadLetterSink
 	Retry    RetryPolicy
+	Metrics  MetricsRecorder // optional
 
 	in      chan queued
 	closeCh chan struct{}
@@ -191,12 +200,19 @@ func (b *Batcher) flush(batch []queued) {
 		return
 	}
 
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	result, sendErr := b.Adapter.Send(ctx, body)
 	cancel()
+	if b.Metrics != nil {
+		b.Metrics.ObserveFlushLatency(b.Provider, time.Since(start))
+	}
 
 	if sendErr != nil {
 		disposition := b.Adapter.Classify(sendErr, 0)
+		if b.Metrics != nil {
+			b.Metrics.RecordSendError(b.Provider, disposition)
+		}
 		for _, q := range batch {
 			b.resolve(q, disposition, sendErr)
 		}
@@ -246,8 +262,11 @@ func (b *Batcher) ack(q queued, disposition adapter.Disposition) {
 	// A durable-ack failure here leaves the WAL entry pending, which is
 	// safe under at-least-once delivery (it will simply be redelivered)
 	// but currently invisible to operators.
-	// TODO: surface via metrics/logging instead of silently dropping.
+	// TODO: surface via logging instead of silently dropping.
 	_ = b.Acker.Ack(q.event.ID, b.Provider, disposition)
+	if b.Metrics != nil {
+		b.Metrics.RecordAck(b.Provider, disposition)
+	}
 }
 
 func (b *Batcher) deadLetter(q queued, reason string) {
