@@ -36,8 +36,8 @@ type MetricsRecorder interface {
 }
 
 // RetryPolicy controls exponential backoff + jitter, and caps total retry
-// duration below the provider's dedup window (see ARCHITECTURE.md
-// "Delivery guarantees") so a redelivered event can never double-count.
+// duration below the provider's dedup window so a redelivered event can
+// never double-count.
 type RetryPolicy struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
@@ -79,7 +79,7 @@ type queued struct {
 
 // Batcher is the per-provider queue + flush + retry engine. Network
 // coalescing only: raw events reach the provider intact, batching never
-// aggregates them (see ARCHITECTURE.md Goals).
+// aggregates them.
 type Batcher struct {
 	Provider string
 	Adapter  adapter.Adapter

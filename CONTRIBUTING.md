@@ -30,9 +30,6 @@ golangci-lint run
   throughput in this first pass — see the `TODO` comments in
   `internal/wal`, `internal/batcher`, and `internal/dispatcher` for known
   simplifications before touching that code.
-- `ARCHITECTURE.md` (kept outside this repo, alongside it) is the design
-  reference; if you're changing behavior described there, flag the
-  mismatch in your PR description.
 
 ## Commit messages
 

@@ -1,5 +1,5 @@
 # Example tallyd configuration. Copy to config.yaml and adjust for your
-# environment; see ARCHITECTURE.md for the full design this maps to.
+# environment.
 listen:
   http: "127.0.0.1:8999"
 

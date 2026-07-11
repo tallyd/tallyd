@@ -27,8 +27,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// Config is tallyd's top-level configuration, matching the shape sketched
-// in ARCHITECTURE.md's "Config sketch" section.
+// Config is tallyd's top-level configuration.
 type Config struct {
 	Listen    ListenConfig              `yaml:"listen"`
 	Buffer    BufferConfig              `yaml:"buffer"`
@@ -42,10 +41,9 @@ type ListenConfig struct {
 
 type BufferConfig struct {
 	Dir string `yaml:"dir"`
-	// MaxBytes is reserved for enforcing the WAL size cap (see
-	// ARCHITECTURE.md "Backpressure"). Not enforced yet in this first
-	// pass — TODO: reject new Appends with 429 once the WAL directory
-	// exceeds this size, rather than growing unbounded.
+	// MaxBytes is reserved for enforcing the WAL size cap. Not enforced
+	// yet in this first pass — TODO: reject new Appends with 429 once the
+	// WAL directory exceeds this size, rather than growing unbounded.
 	MaxBytes int64 `yaml:"max_bytes"`
 	// OnFull is reserved alongside MaxBytes; only "reject" is a
 	// meaningful value until backpressure is implemented.
@@ -54,10 +52,9 @@ type BufferConfig struct {
 
 // ProviderConfig describes one billing provider target. Type selects
 // which adapter.Adapter implementation to use; only "stdout" is
-// implemented in this first pass (see ARCHITECTURE.md "Open decisions" —
-// Orb and Metronome adapters are the next unit of work). Endpoint and
-// TokenEnv are carried through now so the config format doesn't need to
-// change once real adapters land.
+// implemented in this first pass (Orb and Metronome adapters are the
+// next unit of work). Endpoint and TokenEnv are carried through now so
+// the config format doesn't need to change once real adapters land.
 type ProviderConfig struct {
 	Type     string      `yaml:"type"`
 	Endpoint string      `yaml:"endpoint"`

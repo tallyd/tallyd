@@ -1,5 +1,5 @@
 // Package pipeline wires receiver -> WAL -> dispatcher -> batcher ->
-// adapter into a running whole, per ARCHITECTURE.md's data flow diagram.
+// adapter into a running whole.
 package pipeline
 
 import (

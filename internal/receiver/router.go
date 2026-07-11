@@ -10,8 +10,7 @@ type Rule struct {
 }
 
 // StaticRouter implements Router with a fixed default provider list plus
-// simple event-name match rules, mirroring the `routing` block in
-// ARCHITECTURE.md's config sketch.
+// simple event-name match rules.
 type StaticRouter struct {
 	Default []string
 	Rules   []Rule
