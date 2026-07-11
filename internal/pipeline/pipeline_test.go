@@ -42,13 +42,13 @@ func captureStdout(t *testing.T) func() string {
 	done := make(chan string, 1)
 	go func() {
 		var buf bytes.Buffer
-		buf.ReadFrom(r)
+		_, _ = buf.ReadFrom(r)
 		done <- buf.String()
 	}()
 
 	return func() string {
 		os.Stdout = orig
-		w.Close()
+		_ = w.Close()
 		return <-done
 	}
 }
@@ -71,7 +71,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build pipeline: %v", err)
 	}
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 
 	restoreStdout := captureStdout(t)
 

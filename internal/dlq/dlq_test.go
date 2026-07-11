@@ -17,7 +17,7 @@ func TestPutAppendsAndTracksDepth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 
 	evt := adapter.Event{ID: "evt-1", CustomerID: "cust_1", EventName: "api_call", Timestamp: time.Now()}
 	if err := d.Put("orb", evt, "4xx from provider"); err != nil {
@@ -38,7 +38,7 @@ func TestPutAppendsAndTracksDepth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open dlq file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	lines := 0
 	sc := bufio.NewScanner(f)

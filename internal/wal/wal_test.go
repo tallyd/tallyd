@@ -66,7 +66,7 @@ func TestAppendAckReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer w2.Close()
+	defer func() { _ = w2.Close() }()
 
 	pending := w2.Pending()
 	if len(pending) != 2 {
@@ -129,7 +129,7 @@ func TestCrashRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen wal after simulated crash: %v", err)
 	}
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	pending := w.Pending()
 	if len(pending) != crashEventCount {
@@ -170,7 +170,7 @@ func runCrashHelperProcess() {
 	// crashEventCount events are already durable. Kill this process right
 	// now, with no graceful Close, to simulate a crash immediately after
 	// the last durable write.
-	syscall.Kill(os.Getpid(), syscall.SIGKILL)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 
 	// Should never reach here.
 	time.Sleep(time.Second)

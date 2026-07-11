@@ -134,7 +134,7 @@ func (w *WAL) replay() error {
 			return fmt.Errorf("wal: open segment %s: %w", path, err)
 		}
 		records, err := decodeRecords(f)
-		f.Close()
+		_ = f.Close()
 		if err != nil {
 			return fmt.Errorf("wal: decode segment %s: %w", path, err)
 		}
@@ -438,9 +438,9 @@ func (w *WAL) decrefSegment(seq uint64) {
 		seg.refCount--
 		if seg.refCount == 0 && i != len(w.segments)-1 {
 			if seg.f != nil {
-				seg.close()
+				_ = seg.close()
 			}
-			os.Remove(seg.path)
+			_ = os.Remove(seg.path)
 			w.segments = append(w.segments[:i], w.segments[i+1:]...)
 		}
 		return

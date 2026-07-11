@@ -46,11 +46,11 @@ func openSegmentForAppend(dir string, seq uint64) (*segment, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return &segment{seq: seq, path: path, f: f, size: info.Size()}, nil
