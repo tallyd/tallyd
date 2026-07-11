@@ -1,0 +1,28 @@
+# Example tallyd configuration. Copy to config.yaml and adjust for your
+# environment; see ARCHITECTURE.md for the full design this maps to.
+listen:
+  http: "127.0.0.1:8999"
+
+buffer:
+  dir: ./data/wal
+  max_bytes: 2147483648 # 2GiB (not yet enforced; see BufferConfig.MaxBytes)
+  on_full: reject
+
+# Only "stdout" is implemented so far — it prints batches instead of
+# calling a real billing API, so the whole pipeline can be exercised
+# without vendor credentials. Orb and Metronome adapters are next.
+providers:
+  stdout:
+    type: stdout
+    batch:
+      max_events: 500
+      linger: 10s
+    retry:
+      max_elapsed: 30m
+      max_interval: 2m
+
+routing:
+  default: [stdout]
+  rules:
+    - match: { event_name: "api_call" }
+      route: [stdout]
