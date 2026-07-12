@@ -19,6 +19,7 @@ import (
 	"github.com/tallyd/tallyd/internal/batcher"
 	"github.com/tallyd/tallyd/internal/dispatcher"
 	"github.com/tallyd/tallyd/internal/dlq"
+	"github.com/tallyd/tallyd/internal/dlqreplay"
 	"github.com/tallyd/tallyd/internal/grpcapi"
 	"github.com/tallyd/tallyd/internal/grpcserver"
 	"github.com/tallyd/tallyd/internal/metrics"
@@ -35,6 +36,7 @@ type Pipeline struct {
 	Batchers   map[string]*batcher.Batcher
 	Dispatcher *dispatcher.Dispatcher
 	Receiver   *receiver.Receiver
+	DLQReplay  *dlqreplay.Handler
 	// GRPCServer is nil when Config.Listen.GRPC is empty — the gRPC
 	// listener is entirely optional, off by default. When non-nil, the
 	// caller (cmd/tallyd) owns starting/stopping it, same as the HTTP
@@ -120,8 +122,16 @@ func Build(cfg *Config) (*Pipeline, error) {
 		})
 	}
 
-	recv := receiver.New(&walDispatchSink{wal: w, disp: disp}, router)
+	sink := &walDispatchSink{wal: w, disp: disp}
+
+	recv := receiver.New(sink, router)
 	recv.Metrics = m
+
+	knownProviders := make(map[string]bool, len(cfg.Providers))
+	for name := range cfg.Providers {
+		knownProviders[name] = true
+	}
+	replay := &dlqreplay.Handler{Sink: sink, DLQ: dq, KnownProviders: knownProviders}
 
 	var grpcServer *grpc.Server
 	if cfg.Listen.GRPC != "" {
@@ -137,6 +147,7 @@ func Build(cfg *Config) (*Pipeline, error) {
 		Batchers:   batchers,
 		Dispatcher: disp,
 		Receiver:   recv,
+		DLQReplay:  replay,
 		GRPCServer: grpcServer,
 	}, nil
 }
@@ -185,12 +196,13 @@ func buildAdapter(pc ProviderConfig) (adapter.Adapter, error) {
 	}
 }
 
-// Handler returns the top-level HTTP handler: POST /v1/events plus
-// GET /metrics.
+// Handler returns the top-level HTTP handler: POST /v1/events,
+// GET /metrics, and POST /v1/dlq/replay?provider=X[&include_poison=true].
 func (p *Pipeline) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Receiver.Handler())
 	mux.Handle("/metrics", p.Metrics.Handler())
+	mux.Handle("/v1/dlq/replay", p.DLQReplay)
 	return mux
 }
 
