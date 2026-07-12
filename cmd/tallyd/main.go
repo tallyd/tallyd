@@ -7,9 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,10 +21,59 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == "dlq" && os.Args[2] == "replay" {
+		if err := runDLQReplay(os.Args[3:]); err != nil {
+			fmt.Fprintln(os.Stderr, "tallyd:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tallyd:", err)
 		os.Exit(1)
 	}
+}
+
+// runDLQReplay implements `tallyd dlq replay`, a thin client for the
+// running daemon's POST /v1/dlq/replay admin endpoint — it does not talk
+// to the DLQ files directly, since the daemon (if running) already has
+// them open.
+func runDLQReplay(args []string) error {
+	fs := flag.NewFlagSet("dlq replay", flag.ExitOnError)
+	provider := fs.String("provider", "", "provider name to replay dead-lettered events for (required)")
+	addr := fs.String("addr", "http://127.0.0.1:8999", "tallyd HTTP address")
+	includePoison := fs.Bool("include-poison", false, "also replay poisoned (repeatedly-failed) entries")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *provider == "" {
+		return fmt.Errorf("dlq replay: -provider is required")
+	}
+
+	q := url.Values{"provider": {*provider}}
+	if *includePoison {
+		q.Set("include_poison", "true")
+	}
+	replayURL := fmt.Sprintf("%s/v1/dlq/replay?%s", *addr, q.Encode())
+
+	resp, err := http.Post(replayURL, "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("dlq replay: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("dlq replay: read response: %w", err)
+	}
+	fmt.Println(string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("dlq replay: server returned %s", resp.Status)
+	}
+	return nil
 }
 
 func run() error {
