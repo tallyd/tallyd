@@ -52,6 +52,20 @@ event will survive a crash." `internal/wal/wal_test.go`'s
 `TestCrashRecovery` proves this by SIGKILLing a real subprocess mid-run
 and asserting replay recovers everything that was ever acked.
 
+**WAL size is bounded, not unbounded**: `Config.Buffer.MaxBytes` (via
+`wal.WithMaxBytes`) caps total on-disk size across every segment,
+checked in `Append` via `WAL.TotalBytes()` before submitting the write;
+once over the cap, `Append` returns `wal.ErrBufferFull` and the receiver
+surfaces that as `503`/`Unavailable` rather than growing the WAL forever.
+`<= 0` (unset) means unlimited. `pipeline.Build` fails fast at startup if
+`Buffer.OnFull` is set to anything other than `"reject"` — the only
+implemented policy. Note that ack records consume WAL space too (written
+to whichever segment is currently active, not necessarily the segment the
+original event lives in) — `TestBufferSpaceFreesAfterSegmentGC` in
+`internal/wal/wal_test.go` probes real on-disk sizes empirically rather
+than assuming event/ack framing overhead, precisely because this is easy
+to get wrong by hand.
+
 **Two transports, one core**: `receiver.Receiver.Ingest([]adapter.Event) error` is the transport-agnostic core (validate → route → durably append) — both the HTTP handler (`handleEvents`, JSON decode) and `internal/grpcserver.Server` (protobuf decode, generated from `proto/tallyd/v1/events.proto`) are thin shims that convert into `[]adapter.Event` and call it, so validation/routing/durability behave identically no matter which transport an event arrived through. `Ingest` returns typed `*receiver.ValidationError` / `*receiver.UnavailableError` so each transport maps them to its own status codes (HTTP 400/503, gRPC `InvalidArgument`/`Unavailable`) without duplicating the classification logic. The gRPC listener is optional and off by default (`Config.Listen.GRPC` empty, or `pipeline.Pipeline.GRPCServer` nil) — `cmd/tallyd/main.go` only starts it if configured, and treats its shutdown the same way as the HTTP server's (`GracefulStop()` alongside `server.Shutdown()`). One easy-to-miss detail if you touch the gRPC conversion path: `(*timestamppb.Timestamp)(nil).AsTime()` returns Unix epoch, not Go's zero `time.Time{}` — `grpcserver.toEvents` explicitly checks for a nil `Timestamp` first, otherwise a client that omits it would silently skip the "timestamp is required" validation that the HTTP path correctly enforces.
 
 **Dual delivery paths, same durability boundary**: once an event is

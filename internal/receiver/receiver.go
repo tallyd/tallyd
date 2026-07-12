@@ -112,7 +112,7 @@ func (r *Receiver) Ingest(events []adapter.Event) error {
 	// event ID is the provider-side idempotency key.
 	for i, e := range events {
 		if err := r.Sink.Append(e, providers[i]); err != nil {
-			return &UnavailableError{msg: "failed to durably persist event"}
+			return &UnavailableError{msg: fmt.Sprintf("failed to durably persist event: %v", err)}
 		}
 	}
 

@@ -1,6 +1,7 @@
 package wal_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -94,6 +95,95 @@ func sortedCopy(s []string) []string {
 	out := append([]string(nil), s...)
 	sort.Strings(out)
 	return out
+}
+
+// TestAppendRejectedWhenBufferFull proves Append enforces WithMaxBytes:
+// once the WAL's total on-disk size would exceed the cap, new Appends
+// fail with ErrBufferFull rather than growing the WAL unbounded.
+func TestAppendRejectedWhenBufferFull(t *testing.T) {
+	dir := t.TempDir()
+
+	// A cap far smaller than even one event's on-disk frame guarantees
+	// the very first Append already exceeds it, without needing to know
+	// the exact framing/JSON overhead.
+	w, err := wal.Open(dir, wal.WithMaxBytes(1))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	err = w.Append(testEvent("evt-0"), []string{"orb"})
+	if !errors.Is(err, wal.ErrBufferFull) {
+		t.Fatalf("append with maxBytes=1: got %v, want ErrBufferFull", err)
+	}
+}
+
+// TestBufferSpaceFreesAfterSegmentGC proves the backpressure is not
+// permanent: once enough events are fully acked that a whole segment
+// becomes garbage-collectable, TotalBytes drops and further Appends
+// succeed again. Ack records themselves consume WAL space too (written
+// to whichever segment is currently active), so sizes are probed
+// empirically rather than assumed.
+func TestBufferSpaceFreesAfterSegmentGC(t *testing.T) {
+	probeDir := t.TempDir()
+	probe, err := wal.Open(probeDir)
+	if err != nil {
+		t.Fatalf("open (probe): %v", err)
+	}
+	if err := probe.Append(testEvent("evt-0"), []string{"orb"}); err != nil {
+		t.Fatalf("probe append: %v", err)
+	}
+	oneEventSize := probe.TotalBytes()
+	if err := probe.Ack("evt-0", "orb", adapter.Ok); err != nil {
+		t.Fatalf("probe ack: %v", err)
+	}
+	oneAckSize := probe.TotalBytes() - oneEventSize
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close probe: %v", err)
+	}
+	if oneAckSize >= oneEventSize {
+		t.Fatalf("test assumption violated: ack record (%d bytes) not smaller than event record (%d bytes)", oneAckSize, oneEventSize)
+	}
+
+	dir := t.TempDir()
+	// Segment holds exactly 2 events before rotating; buffer fits 3
+	// events' worth of data plus one ack record — enough to reject a 4th
+	// event before any GC, but not after freeing one 2-event segment.
+	maxSegmentBytes := oneEventSize*2 + 1
+	maxBytes := oneEventSize*3 + oneAckSize
+	w, err := wal.Open(dir, wal.WithMaxSegmentBytes(maxSegmentBytes), wal.WithMaxBytes(maxBytes))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	// evt-0 and evt-1 share one segment; evt-2 rotates into a second.
+	if err := w.Append(testEvent("evt-0"), []string{"orb"}); err != nil {
+		t.Fatalf("append evt-0: %v", err)
+	}
+	if err := w.Append(testEvent("evt-1"), []string{"orb"}); err != nil {
+		t.Fatalf("append evt-1: %v", err)
+	}
+	if err := w.Append(testEvent("evt-2"), []string{"orb"}); err != nil {
+		t.Fatalf("append evt-2: %v", err)
+	}
+
+	if err := w.Append(testEvent("evt-3"), []string{"orb"}); !errors.Is(err, wal.ErrBufferFull) {
+		t.Fatalf("append evt-3 while full: got %v, want ErrBufferFull", err)
+	}
+
+	// Fully resolve both evt-0 and evt-1 — every entry originally written
+	// to their shared segment — freeing it via GC.
+	if err := w.Ack("evt-0", "orb", adapter.Ok); err != nil {
+		t.Fatalf("ack evt-0: %v", err)
+	}
+	if err := w.Ack("evt-1", "orb", adapter.Ok); err != nil {
+		t.Fatalf("ack evt-1: %v", err)
+	}
+
+	if err := w.Append(testEvent("evt-3"), []string{"orb"}); err != nil {
+		t.Fatalf("append evt-3 after freeing space: %v", err)
+	}
 }
 
 const (

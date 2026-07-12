@@ -116,3 +116,60 @@ func TestPipelineEndToEnd(t *testing.T) {
 		t.Errorf("metrics missing events_acked_total Ok; got:\n%s", metricsBody)
 	}
 }
+
+func TestBuildRejectsUnimplementedOnFull(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &pipeline.Config{
+		Buffer: pipeline.BufferConfig{Dir: filepath.Join(dir, "wal"), OnFull: "drop_best_effort"},
+	}
+
+	_, err := pipeline.Build(cfg)
+	if err == nil {
+		t.Fatal("expected Build to fail fast on an unimplemented on_full policy")
+	}
+	if !strings.Contains(err.Error(), "drop_best_effort") {
+		t.Errorf("error = %v, want it to mention the rejected on_full value", err)
+	}
+}
+
+func TestBuildWiresMaxBytesIntoWAL(t *testing.T) {
+	dir := t.TempDir()
+
+	cfg := &pipeline.Config{
+		Buffer: pipeline.BufferConfig{Dir: filepath.Join(dir, "wal"), MaxBytes: 1},
+		Providers: map[string]pipeline.ProviderConfig{
+			"stdouttest": {
+				Type:  "stdout",
+				Batch: pipeline.BatchConfig{Linger: pipeline.Duration{Duration: time.Hour}},
+			},
+		},
+		Routing: pipeline.RoutingConfig{Default: []string{"stdouttest"}},
+	}
+
+	p, err := pipeline.Build(cfg)
+	if err != nil {
+		t.Fatalf("build pipeline: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+
+	body, err := json.Marshal(map[string]any{
+		"id":          "buffer-full-evt",
+		"customer_id": "cust_1",
+		"event_name":  "api_call",
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/events", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (buffer full); body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "buffer full") {
+		t.Errorf("body = %q, want it to mention the buffer-full reason", rec.Body.String())
+	}
+}

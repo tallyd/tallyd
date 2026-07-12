@@ -44,12 +44,15 @@ type ListenConfig struct {
 
 type BufferConfig struct {
 	Dir string `yaml:"dir"`
-	// MaxBytes is reserved for enforcing the WAL size cap. Not enforced
-	// yet in this first pass — TODO: reject new Appends with 429 once the
-	// WAL directory exceeds this size, rather than growing unbounded.
+	// MaxBytes caps the WAL's total on-disk size across all segments.
+	// <= 0 (the zero value, i.e. unset) means unlimited. Once the cap is
+	// hit, new Appends are rejected (wal.ErrBufferFull), which the
+	// receiver surfaces to the caller as a 503/Unavailable — see
+	// wal.WAL.TotalBytes and Append.
 	MaxBytes int64 `yaml:"max_bytes"`
-	// OnFull is reserved alongside MaxBytes; only "reject" is a
-	// meaningful value until backpressure is implemented.
+	// OnFull must be "reject" — the only implemented policy so far.
+	// pipeline.Build fails fast at startup if it's set to anything else
+	// (e.g. "drop_best_effort", which isn't built yet).
 	OnFull string `yaml:"on_full"`
 }
 

@@ -7,8 +7,8 @@ listen:
 
 buffer:
   dir: ./data/wal
-  max_bytes: 2147483648 # 2GiB (not yet enforced; see BufferConfig.MaxBytes)
-  on_full: reject
+  max_bytes: 2147483648 # 2GiB; new events are rejected (503) once the WAL exceeds this
+  on_full: reject # only supported value so far
 
 # "stdout" prints batches instead of calling a real billing API, so the
 # whole pipeline can be exercised without vendor credentials. "metronome"

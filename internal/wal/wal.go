@@ -9,6 +9,7 @@ package wal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -16,6 +17,14 @@ import (
 
 	"github.com/earthy1024/tallyd/adapter"
 )
+
+// ErrBufferFull is returned by Append when the WAL's total on-disk size
+// has reached its configured cap (WithMaxBytes) and on_full is "reject".
+// This is a soft, approximate limit: the check reads TotalBytes() once
+// before submitting the write, so concurrent Appends racing right at the
+// boundary could push the total slightly over — acceptable for a
+// backpressure signal, not a hard allocation guarantee.
+var ErrBufferFull = errors.New("wal: buffer full")
 
 const defaultMaxSegmentBytes = 64 * 1024 * 1024 // 64MiB
 
@@ -71,6 +80,9 @@ type writeRequest struct {
 type WAL struct {
 	dir             string
 	maxSegmentBytes int64
+	// maxBytes caps total on-disk size across all segments; <= 0 means
+	// unlimited (the default, and what an unset/zero config value means).
+	maxBytes int64
 
 	mu       sync.RWMutex
 	index    map[string]*entryState
@@ -90,6 +102,13 @@ type Option func(*WAL)
 // WithMaxSegmentBytes overrides the default segment rotation threshold.
 func WithMaxSegmentBytes(n int64) Option {
 	return func(w *WAL) { w.maxSegmentBytes = n }
+}
+
+// WithMaxBytes caps the WAL's total on-disk size across all segments. A
+// value <= 0 (the zero value) means unlimited — Append is never rejected
+// for size.
+func WithMaxBytes(n int64) Option {
+	return func(w *WAL) { w.maxBytes = n }
 }
 
 // Open opens (or creates) a WAL rooted at dir, replaying any existing
@@ -230,8 +249,14 @@ func (w *WAL) Append(event adapter.Event, providers []string) error {
 		return fmt.Errorf("wal: marshal event: %w", err)
 	}
 
+	frame := encodeFrame(recTypeEvent, payload)
+
+	if w.maxBytes > 0 && w.TotalBytes()+int64(len(frame)) > w.maxBytes {
+		return ErrBufferFull
+	}
+
 	req := &writeRequest{
-		frame: encodeFrame(recTypeEvent, payload),
+		frame: frame,
 		done:  make(chan error, 1),
 	}
 	req.apply = func(segSeq uint64) {
@@ -244,6 +269,19 @@ func (w *WAL) Append(event adapter.Event, providers []string) error {
 	}
 
 	return w.submit(req)
+}
+
+// TotalBytes reports the WAL's current total on-disk size across every
+// segment (including ones already rotated out but not yet garbage
+// collected). Feeds Append's ErrBufferFull check.
+func (w *WAL) TotalBytes() int64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	var total int64
+	for _, seg := range w.segments {
+		total += seg.size
+	}
+	return total
 }
 
 // Ack records that provider has resolved (accepted or permanently failed)

@@ -68,7 +68,11 @@ func (s *walDispatchSink) Append(event adapter.Event, providers []string) error 
 func Build(cfg *Config) (*Pipeline, error) {
 	cfg.applyDefaults()
 
-	w, err := wal.Open(cfg.Buffer.Dir)
+	if cfg.Buffer.OnFull != "reject" {
+		return nil, fmt.Errorf("pipeline: buffer.on_full %q not implemented (only \"reject\" is supported)", cfg.Buffer.OnFull)
+	}
+
+	w, err := wal.Open(cfg.Buffer.Dir, wal.WithMaxBytes(cfg.Buffer.MaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: open wal: %w", err)
 	}
