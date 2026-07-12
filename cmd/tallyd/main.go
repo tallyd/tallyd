@@ -51,7 +51,11 @@ func run() error {
 	defer cancel()
 	go p.RunGauges(ctx, 2*time.Second)
 
-	server := &http.Server{Addr: cfg.Listen.HTTP, Handler: p.Handler()}
+	httpLis, err := net.Listen("tcp", cfg.Listen.HTTP)
+	if err != nil {
+		return fmt.Errorf("http listen on %s: %w", cfg.Listen.HTTP, err)
+	}
+	server := &http.Server{Handler: p.Handler()}
 
 	// Buffered for 2: both the HTTP and (if enabled) gRPC goroutines can
 	// send here, but only the first is ever read by the select below. A
@@ -61,8 +65,11 @@ func run() error {
 	// the other's send — size 1 would leave that sender blocked forever.
 	serverErrCh := make(chan error, 2)
 	go func() {
-		log.Printf("tallyd HTTP listening on %s", cfg.Listen.HTTP)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Log the listener's actual bound address, not cfg.Listen.HTTP —
+		// they differ whenever the configured port is 0 (OS-assigned),
+		// and printing the pre-resolution string would be misleading.
+		log.Printf("tallyd HTTP listening on %s", httpLis.Addr())
+		if err := server.Serve(httpLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErrCh <- err
 			return
 		}
