@@ -14,12 +14,22 @@ import (
 	"github.com/tallyd/tallyd/internal/wal"
 )
 
+// fixedTestTimestamp is used instead of time.Now() so every testEvent has
+// an identical on-disk frame size. time.Time's JSON encoding trims
+// trailing zero fractional digits (RFC3339Nano's `.999999999`), so
+// real timestamps vary in encoded length by several bytes depending on
+// the nanosecond value at creation — exactly the kind of variance that
+// breaks byte-size arithmetic in tests like
+// TestBufferSpaceFreesAfterSegmentGC, which assume every event frame is
+// the same size.
+var fixedTestTimestamp = time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+
 func testEvent(id string) adapter.Event {
 	return adapter.Event{
 		ID:         id,
 		CustomerID: "cust_1",
 		EventName:  "api_call",
-		Timestamp:  time.Now().UTC(),
+		Timestamp:  fixedTestTimestamp,
 		Properties: map[string]any{"endpoint": "/charge"},
 	}
 }
