@@ -10,8 +10,8 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
       - run: go build ./...
@@ -20,8 +20,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
       - uses: golangci/golangci-lint-action@v7
@@ -38,9 +38,13 @@ jobs:
 
   dco:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Dependabot's own commits never carry a Signed-off-by trailer and a
+    # bot can't meaningfully DCO-sign off in the legal sense the trailer
+    # implies, so its PRs are exempt — same as other bots are commonly
+    # allowlisted from this check elsewhere.
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check DCO sign-off on every commit
