@@ -38,7 +38,11 @@ jobs:
 
   dco:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Dependabot's own commits never carry a Signed-off-by trailer and a
+    # bot can't meaningfully DCO-sign off in the legal sense the trailer
+    # implies, so its PRs are exempt — same as other bots are commonly
+    # allowlisted from this check elsewhere.
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
