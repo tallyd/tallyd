@@ -132,6 +132,49 @@ func TestBuildRejectsUnimplementedOnFull(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsUnknownProviderInRoutingDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &pipeline.Config{
+		Buffer: pipeline.BufferConfig{Dir: filepath.Join(dir, "wal")},
+		Providers: map[string]pipeline.ProviderConfig{
+			"stdout": {Type: "stdout"},
+		},
+		Routing: pipeline.RoutingConfig{Default: []string{"stdot"}}, // typo
+	}
+
+	_, err := pipeline.Build(cfg)
+	if err == nil {
+		t.Fatal("expected Build to fail fast on an unknown provider in routing.default")
+	}
+	if !strings.Contains(err.Error(), "stdot") {
+		t.Errorf("error = %v, want it to name the unknown provider", err)
+	}
+}
+
+func TestBuildRejectsUnknownProviderInRoutingRule(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &pipeline.Config{
+		Buffer: pipeline.BufferConfig{Dir: filepath.Join(dir, "wal")},
+		Providers: map[string]pipeline.ProviderConfig{
+			"stdout": {Type: "stdout"},
+		},
+		Routing: pipeline.RoutingConfig{
+			Default: []string{"stdout"},
+			Rules: []pipeline.RoutingRule{
+				{Match: pipeline.RoutingMatch{EventName: "api_call"}, Route: []string{"metronome"}},
+			},
+		},
+	}
+
+	_, err := pipeline.Build(cfg)
+	if err == nil {
+		t.Fatal("expected Build to fail fast on an unknown provider in a routing rule")
+	}
+	if !strings.Contains(err.Error(), "metronome") || !strings.Contains(err.Error(), "api_call") {
+		t.Errorf("error = %v, want it to name the unknown provider and the offending rule", err)
+	}
+}
+
 func TestBuildWiresMaxBytesIntoWAL(t *testing.T) {
 	dir := t.TempDir()
 

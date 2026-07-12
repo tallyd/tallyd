@@ -72,6 +72,10 @@ func Build(cfg *Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("pipeline: buffer.on_full %q not implemented (only \"reject\" is supported)", cfg.Buffer.OnFull)
 	}
 
+	if err := validateRouting(cfg); err != nil {
+		return nil, fmt.Errorf("pipeline: %w", err)
+	}
+
 	w, err := wal.Open(cfg.Buffer.Dir, wal.WithMaxBytes(cfg.Buffer.MaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: open wal: %w", err)
@@ -135,6 +139,27 @@ func Build(cfg *Config) (*Pipeline, error) {
 		Receiver:   recv,
 		GRPCServer: grpcServer,
 	}, nil
+}
+
+// validateRouting fails fast at startup if routing.default or any
+// routing.rules entry names a provider that doesn't exist in
+// cfg.Providers — otherwise the mistake would only surface later, as a
+// 503 on whichever request first happened to match the bad rule, instead
+// of an immediate, clear startup error.
+func validateRouting(cfg *Config) error {
+	for _, name := range cfg.Routing.Default {
+		if _, ok := cfg.Providers[name]; !ok {
+			return fmt.Errorf("routing.default references unknown provider %q", name)
+		}
+	}
+	for i, rule := range cfg.Routing.Rules {
+		for _, name := range rule.Route {
+			if _, ok := cfg.Providers[name]; !ok {
+				return fmt.Errorf("routing.rules[%d] (event_name=%q) references unknown provider %q", i, rule.Match.EventName, name)
+			}
+		}
+	}
+	return nil
 }
 
 func buildAdapter(pc ProviderConfig) (adapter.Adapter, error) {

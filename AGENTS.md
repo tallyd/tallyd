@@ -148,7 +148,12 @@ custom `Duration` type (`UnmarshalYAML` via `time.ParseDuration`, since
 out of the box). `Config.applyDefaults()` fills in unset fields
 per-provider; `cmd/tallyd/main.go` calls `pipeline.LoadConfig` if `-config`
 is given, otherwise builds a zero-value `Config` and lets `pipeline.Build`
-apply defaults.
+apply defaults. `pipeline.Build` also validates before doing anything
+else: `Buffer.OnFull` must be `"reject"`, and every provider name in
+`Routing.Default`/`Routing.Rules` must exist in `Providers` —
+`validateRouting` catches a typo'd provider name at startup instead of
+letting it surface later as a `503` on whichever request first matches
+the bad rule.
 
 **Testing patterns worth reusing**: fake `Acker`/`DeadLetterSink`/`Adapter`
 implementations in `internal/batcher/batcher_test.go` and
