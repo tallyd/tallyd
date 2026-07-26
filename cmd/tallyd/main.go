@@ -182,11 +182,23 @@ func run() error {
 	defer cancel()
 	go p.RunGauges(ctx, 2*time.Second)
 
+	// Bind both listeners before serving on either. If one fails, nothing
+	// has been exposed to traffic yet, so we can fail startup cleanly
+	// instead of tearing down an already-running server.
 	httpLis, err := net.Listen("tcp", cfg.Listen.HTTP)
 	if err != nil {
 		return fmt.Errorf("http listen on %s: %w", cfg.Listen.HTTP, err)
 	}
 	server := &http.Server{Handler: p.Handler()}
+
+	var grpcLis net.Listener
+	if p.GRPCServer != nil {
+		grpcLis, err = net.Listen("tcp", cfg.Listen.GRPC)
+		if err != nil {
+			_ = httpLis.Close()
+			return fmt.Errorf("grpc listen on %s: %w", cfg.Listen.GRPC, err)
+		}
+	}
 
 	// Buffered for 2: both the HTTP and (if enabled) gRPC goroutines can
 	// send here, but only the first is ever read by the select below. A
@@ -208,12 +220,8 @@ func run() error {
 	}()
 
 	if p.GRPCServer != nil {
-		grpcLis, err := net.Listen("tcp", cfg.Listen.GRPC)
-		if err != nil {
-			return fmt.Errorf("grpc listen on %s: %w", cfg.Listen.GRPC, err)
-		}
 		go func() {
-			log.Printf("tallyd gRPC listening on %s", cfg.Listen.GRPC)
+			log.Printf("tallyd gRPC listening on %s", grpcLis.Addr())
 			if err := p.GRPCServer.Serve(grpcLis); err != nil {
 				serverErrCh <- err
 			}
