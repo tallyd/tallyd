@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -175,6 +176,16 @@ func run() error {
 
 	p, err := pipeline.Build(cfg)
 	if err != nil {
+		// The built-in default buffer.dir (/var/lib/tallyd/wal) is tuned for
+		// the container image, where the volume is pre-created for the
+		// nonroot UID. Running the binary directly as an unprivileged user
+		// hits a permission error there — point them at a writable dir
+		// rather than leaving them to decode a raw mkdir failure.
+		if errors.Is(err, fs.ErrPermission) {
+			log.Printf("hint: tallyd could not create its WAL directory %q. The default is meant for the "+
+				"Docker image; when running the binary directly, set a writable buffer.dir in a config file "+
+				"(see config.example.yaml) and pass it with -config.", cfg.Buffer.Dir)
+		}
 		return fmt.Errorf("build pipeline: %w", err)
 	}
 
