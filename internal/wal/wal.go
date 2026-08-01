@@ -197,23 +197,26 @@ func (w *WAL) replay() error {
 		segRefCount[entry.segSeq]++
 	}
 
-	var activeSeq uint64
-	if len(seqs) > 0 {
-		activeSeq = seqs[len(seqs)-1]
-	}
-
 	for _, seq := range seqs {
-		if seq != activeSeq && segRefCount[seq] == 0 {
-			if err := os.Remove(segmentPath(w.dir, seq)); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("wal: gc segment %d: %w", seq, err)
-			}
-			continue
-		}
 		w.segments = append(w.segments, &segment{
 			seq:      seq,
 			path:     segmentPath(w.dir, seq),
 			refCount: segRefCount[seq],
 		})
+	}
+
+	// GC a prefix of fully-resolved segments from the front, oldest first,
+	// stopping at the first still-referenced one (and never touching the
+	// active/last segment). This mirrors runtime gcSegments' in-order rule
+	// exactly — deleting an out-of-order zero-ref segment here could drop an
+	// ack whose event record survives in a later segment, resurrecting that
+	// event on the very next start (see gcSegments for the full rationale).
+	for len(w.segments) > 1 && w.segments[0].refCount == 0 {
+		seg := w.segments[0]
+		if err := os.Remove(seg.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("wal: gc segment %d: %w", seg.seq, err)
+		}
+		w.segments = w.segments[1:]
 	}
 
 	if len(w.segments) == 0 {
@@ -263,6 +266,16 @@ func (w *WAL) Append(event adapter.Event, providers []string) error {
 		pending := make(map[string]struct{}, len(providers))
 		for _, p := range providers {
 			pending[p] = struct{}{}
+		}
+		// A duplicate-ID append supersedes any prior unresolved entry for
+		// the same event — e.g. a client retrying a whole request after a
+		// partial-append failure, which the receiver documents as the
+		// correct recovery and which re-appends already-durable events.
+		// Release the old entry's segment refcount before overwriting it;
+		// otherwise that segment stays pinned (never reaching refCount 0)
+		// and can't be reclaimed until the next restart's replay.
+		if prev, ok := w.index[event.ID]; ok {
+			w.decrefSegment(prev.segSeq)
 		}
 		w.index[event.ID] = &entryState{event: event, pending: pending, segSeq: segSeq}
 		w.increfSegment(segSeq)
@@ -439,6 +452,12 @@ func (w *WAL) commitBatch(batch []*writeRequest) {
 		}
 		req.done <- err
 	}
+
+	// Reclaim any now-fully-resolved segments. Doing it here, once per
+	// batch, catches both acks applied above (which may have zeroed a
+	// segment's refcount) and any rotation that happened in the write loop
+	// (which turns the previously-active segment into a deletable one).
+	w.gcSegments()
 }
 
 func (w *WAL) rotate(active *segment) error {
@@ -458,7 +477,9 @@ func (w *WAL) rotate(active *segment) error {
 }
 
 // increfSegment and decrefSegment are only ever called from within
-// commitBatch (via req.apply), which holds w.mu for the duration.
+// commitBatch (via req.apply), which holds w.mu for the duration. Neither
+// deletes anything; segment files are reclaimed only by gcSegments, called
+// once at the end of each commitBatch.
 func (w *WAL) increfSegment(seq uint64) {
 	for _, seg := range w.segments {
 		if seg.seq == seq {
@@ -469,18 +490,41 @@ func (w *WAL) increfSegment(seq uint64) {
 }
 
 func (w *WAL) decrefSegment(seq uint64) {
-	for i, seg := range w.segments {
-		if seg.seq != seq {
-			continue
+	for _, seg := range w.segments {
+		if seg.seq == seq {
+			seg.refCount--
+			return
 		}
-		seg.refCount--
-		if seg.refCount == 0 && i != len(w.segments)-1 {
-			if seg.f != nil {
-				_ = seg.close()
-			}
-			_ = os.Remove(seg.path)
-			w.segments = append(w.segments[:i], w.segments[i+1:]...)
+	}
+}
+
+// gcSegments deletes fully-resolved segments from the front of the log,
+// oldest first, stopping at the first segment that still holds an
+// unresolved event (refCount > 0) or at the active (last) segment, which
+// is never deleted. Also called at the end of each commitBatch.
+//
+// Deleting strictly in order — rather than any segment whose event-record
+// refcount happens to be zero — is a correctness requirement, not just
+// tidiness. An event's record and the ack that resolves it can live in
+// different segments (acks always land in whatever segment is active when
+// they're written, which may be far newer than the event's). Freeing an
+// out-of-order middle segment could therefore drop an ack whose event
+// record still survives in a later segment, and that event would be
+// replayed as unresolved — resurrected — on the next start. In-order
+// deletion guarantees a record and its ack are only ever freed once every
+// older segment has been freed too, so the two go together.
+//
+// It also subsumes the old 1->0-edge deletion, which missed any segment
+// that reached refCount 0 while still active and was only later rotated
+// out of active position (nothing re-checked it, so it leaked until the
+// next restart's replay).
+func (w *WAL) gcSegments() {
+	for len(w.segments) > 1 && w.segments[0].refCount == 0 {
+		seg := w.segments[0]
+		if seg.f != nil {
+			_ = seg.close()
 		}
-		return
+		_ = os.Remove(seg.path)
+		w.segments = w.segments[1:]
 	}
 }

@@ -67,6 +67,24 @@ original event lives in) — `TestBufferSpaceFreesAfterSegmentGC` in
 than assuming event/ack framing overhead, precisely because this is easy
 to get wrong by hand.
 
+**Segments are reclaimed strictly oldest-first**: each segment carries a
+refcount (how many still-unresolved events had their *event* record
+written there); `wal.gcSegments` (run at the end of every `commitBatch`,
+and again during replay) deletes a prefix of fully-resolved segments from
+the front, stopping at the first still-referenced one and never touching
+the active segment. In-order deletion is a *correctness* requirement, not
+tidiness: an event's record and the ack that resolves it can live in
+different segments (acks land in whatever segment is active when written),
+so freeing an out-of-order middle segment could drop an ack whose event
+record survives in a later segment — resurrecting that event on the next
+replay. The trade-off is that one long-unresolved event retains every
+newer segment until it clears; that's intended (a newer segment may hold
+the straggler's eventual ack, and you want to retain data for an event
+still awaiting delivery anyway). Corollary: `Append`'s apply must decref
+the prior segment when a duplicate event ID overwrites an index entry (the
+whole-request retry the receiver documents as safe re-appends
+already-durable events), or that segment's refcount never reaches zero.
+
 **Two transports, one core**: `receiver.Receiver.Ingest([]adapter.Event) error` is the transport-agnostic core (validate → route → durably append) — both the HTTP handler (`handleEvents`, JSON decode) and `internal/grpcserver.Server` (protobuf decode, generated from `proto/tallyd/v1/events.proto`) are thin shims that convert into `[]adapter.Event` and call it, so validation/routing/durability behave identically no matter which transport an event arrived through. `Ingest` returns typed `*receiver.ValidationError` / `*receiver.UnavailableError` so each transport maps them to its own status codes (HTTP 400/503, gRPC `InvalidArgument`/`Unavailable`) without duplicating the classification logic. The gRPC listener is optional and off by default (`Config.Listen.GRPC` empty, or `pipeline.Pipeline.GRPCServer` nil) — `cmd/tallyd/main.go` only starts it if configured, and treats its shutdown the same way as the HTTP server's (`GracefulStop()` alongside `server.Shutdown()`). One easy-to-miss detail if you touch the gRPC conversion path: `(*timestamppb.Timestamp)(nil).AsTime()` returns Unix epoch, not Go's zero `time.Time{}` — `grpcserver.toEvents` explicitly checks for a nil `Timestamp` first, otherwise a client that omits it would silently skip the "timestamp is required" validation that the HTTP path correctly enforces.
 
 **Dual delivery paths, same durability boundary**: once an event is

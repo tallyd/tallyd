@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"syscall"
 	"testing"
@@ -193,6 +194,188 @@ func TestBufferSpaceFreesAfterSegmentGC(t *testing.T) {
 
 	if err := w.Append(testEvent("evt-3"), []string{"orb"}); err != nil {
 		t.Fatalf("append evt-3 after freeing space: %v", err)
+	}
+}
+
+// countSegmentFiles returns how many *.wal segment files exist on disk in
+// dir — the observable that segment GC acts on.
+func countSegmentFiles(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".wal" {
+			n++
+		}
+	}
+	return n
+}
+
+// probeEventAckSizes opens a throwaway WAL to measure the on-disk frame
+// size of one event and one ack, so size-sensitive tests can tune
+// WithMaxSegmentBytes precisely (see TestBufferSpaceFreesAfterSegmentGC
+// for the same technique).
+func probeEventAckSizes(t *testing.T) (eventSize, ackSize int64) {
+	t.Helper()
+	dir := t.TempDir()
+	w, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("probe open: %v", err)
+	}
+	if err := w.Append(testEvent("probe"), []string{"orb"}); err != nil {
+		t.Fatalf("probe append: %v", err)
+	}
+	eventSize = w.TotalBytes()
+	if err := w.Ack("probe", "orb", adapter.Ok); err != nil {
+		t.Fatalf("probe ack: %v", err)
+	}
+	ackSize = w.TotalBytes() - eventSize
+	if err := w.Close(); err != nil {
+		t.Fatalf("probe close: %v", err)
+	}
+	if ackSize >= eventSize {
+		t.Fatalf("test assumption violated: ack (%d) not smaller than event (%d)", ackSize, eventSize)
+	}
+	return eventSize, ackSize
+}
+
+// TestResolvedSegmentsDoNotLeak covers the defect where a segment whose
+// refcount reached zero while it was still the active segment was never
+// deleted once it rotated out of active position (the old delete-on-1->0
+// logic only fired for the segment being decremented, and skipped the
+// active one). Appending and fully acking one event per segment, forcing a
+// rotation each time, must not accumulate resolved segment files on disk.
+func TestResolvedSegmentsDoNotLeak(t *testing.T) {
+	eventSize, ackSize := probeEventAckSizes(t)
+	dir := t.TempDir()
+	// A segment holds exactly one event plus one ack, so the next event
+	// always rotates — driving each just-resolved segment out of active
+	// position immediately after it hits refcount zero.
+	w, err := wal.Open(dir, wal.WithMaxSegmentBytes(eventSize+ackSize))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("evt-%d", i)
+		if err := w.Append(testEvent(id), []string{"orb"}); err != nil {
+			t.Fatalf("append %s: %v", id, err)
+		}
+		if err := w.Ack(id, "orb", adapter.Ok); err != nil {
+			t.Fatalf("ack %s: %v", id, err)
+		}
+	}
+
+	if got := w.UnackedCount(); got != 0 {
+		t.Fatalf("UnackedCount() = %d, want 0 (everything acked)", got)
+	}
+	// Only the active segment should remain; every resolved one is GC'd.
+	if n := countSegmentFiles(t, dir); n != 1 {
+		t.Fatalf("segment files on disk = %d, want 1 (resolved segments leaked)", n)
+	}
+}
+
+// TestNoResurrectionWhenAckOutlivesEventSegment covers the defect where
+// out-of-order (arbitrary zero-ref) segment deletion could drop an ack
+// whose event record survived in an older segment, resurrecting that event
+// on a later replay. The fix deletes segments strictly oldest-first, so an
+// ack and the record it resolves are only ever freed together.
+func TestNoResurrectionWhenAckOutlivesEventSegment(t *testing.T) {
+	eventSize, _ := probeEventAckSizes(t)
+	dir := t.TempDir()
+	// Two events per segment before rotating.
+	w, err := wal.Open(dir, wal.WithMaxSegmentBytes(eventSize*2))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	// Layout the defect needs: A's record shares seg0 with a still-pending
+	// B (keeping seg0 alive), while A's ack lands in a newer segment that
+	// itself becomes zero-ref and non-active.
+	//   seg0: [A, B]          seg1: [C, ackA]      seg2: [D, ackC] (active)
+	for _, id := range []string{"evt-A", "evt-B"} { // seg0
+		if err := w.Append(testEvent(id), []string{"orb"}); err != nil {
+			t.Fatalf("append %s: %v", id, err)
+		}
+	}
+	if err := w.Append(testEvent("evt-C"), []string{"orb"}); err != nil { // rotates -> seg1
+		t.Fatalf("append C: %v", err)
+	}
+	if err := w.Ack("evt-A", "orb", adapter.Ok); err != nil { // ackA -> seg1
+		t.Fatalf("ack A: %v", err)
+	}
+	if err := w.Append(testEvent("evt-D"), []string{"orb"}); err != nil { // rotates -> seg2
+		t.Fatalf("append D: %v", err)
+	}
+	if err := w.Ack("evt-C", "orb", adapter.Ok); err != nil { // ackC -> seg2; seg1 now zero-ref, non-active
+		t.Fatalf("ack C: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Two restarts: the resurrection only manifests on the replay *after*
+	// the one that (wrongly) deletes the ack-bearing segment.
+	for restart := 1; restart <= 2; restart++ {
+		w, err = wal.Open(dir)
+		if err != nil {
+			t.Fatalf("reopen %d: %v", restart, err)
+		}
+		pendingIDs := map[string]bool{}
+		for _, e := range w.Pending() {
+			pendingIDs[e.Event.ID] = true
+		}
+		if pendingIDs["evt-A"] {
+			t.Fatalf("restart %d: evt-A resurrected (fully acked before, now pending again)", restart)
+		}
+		if !pendingIDs["evt-B"] {
+			t.Fatalf("restart %d: evt-B should still be pending, got %v", restart, pendingIDs)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close %d: %v", restart, err)
+		}
+	}
+}
+
+// TestDuplicateAppendReleasesOldSegmentRef covers the defect where
+// re-appending an event that's already in the index (the whole-request
+// retry the receiver documents as the correct recovery from a partial
+// append) overwrote the index entry without releasing the prior entry's
+// segment refcount, pinning that segment from GC until restart.
+func TestDuplicateAppendReleasesOldSegmentRef(t *testing.T) {
+	eventSize, _ := probeEventAckSizes(t)
+	dir := t.TempDir()
+	w, err := wal.Open(dir, wal.WithMaxSegmentBytes(eventSize*2))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	// A and its duplicate both land in seg0; B then rotates seg0 out.
+	if err := w.Append(testEvent("evt-A"), []string{"orb"}); err != nil {
+		t.Fatalf("append A: %v", err)
+	}
+	if err := w.Append(testEvent("evt-A"), []string{"orb"}); err != nil { // duplicate ID (retry)
+		t.Fatalf("re-append A: %v", err)
+	}
+	if err := w.Append(testEvent("evt-B"), []string{"orb"}); err != nil { // rotates -> seg1
+		t.Fatalf("append B: %v", err)
+	}
+	if n := countSegmentFiles(t, dir); n != 2 {
+		t.Fatalf("before ack: segment files = %d, want 2", n)
+	}
+
+	// Resolving A must drop seg0 to refcount 0 and GC it. With the leaked
+	// duplicate refcount, seg0 would stay pinned at refcount 1 and survive.
+	if err := w.Ack("evt-A", "orb", adapter.Ok); err != nil {
+		t.Fatalf("ack A: %v", err)
+	}
+	if n := countSegmentFiles(t, dir); n != 1 {
+		t.Fatalf("after acking A: segment files = %d, want 1 (seg0 pinned by leaked duplicate refcount)", n)
 	}
 }
 
