@@ -113,6 +113,7 @@ func Build(cfg *Config) (*Pipeline, error) {
 	}
 
 	disp := dispatcher.New(enqueuers)
+	disp.Logger = log.Default()
 
 	if err := disp.ReplayPending(w.Pending()); err != nil {
 		return nil, fmt.Errorf("pipeline: replay pending wal entries: %w", err)
@@ -128,15 +129,16 @@ func Build(cfg *Config) (*Pipeline, error) {
 
 	sink := &walDispatchSink{wal: w, disp: disp}
 
-	recv := receiver.New(sink, router)
-	recv.Metrics = m
-
 	knownProviders := make(map[string]bool, len(cfg.Providers))
 	providerNames := make([]string, 0, len(cfg.Providers))
 	for name := range cfg.Providers {
 		knownProviders[name] = true
 		providerNames = append(providerNames, name)
 	}
+
+	recv := receiver.New(sink, router)
+	recv.Metrics = m
+	recv.KnownProviders = knownProviders
 	replay := &dlqreplay.Handler{Sink: sink, DLQ: dq, KnownProviders: knownProviders}
 	show := &dlqshow.Handler{DLQ: dq, KnownProviders: knownProviders}
 	stat := &status.Handler{WAL: w, DLQ: dq, Providers: providerNames}

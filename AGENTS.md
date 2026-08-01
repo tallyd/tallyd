@@ -76,7 +76,19 @@ durable, `pipeline.walDispatchSink.Append` does two things — it's the
 delivery. On restart, `dispatcher.ReplayPending(wal.Pending())` re-enqueues
 anything left unresolved from a prior crash before the receiver accepts
 new traffic. So live delivery and crash-recovery delivery are two
-different code paths converging on the same `dispatcher.Dispatch` call.
+different code paths converging on the same `dispatcher` — but not on the
+same strictness: `Dispatch` (live path) errors on an unknown provider,
+while `ReplayPending` deliberately *skips + logs* one and leaves the entry
+pending. That asymmetry is intentional. An unknown provider must never
+reach the live path in the first place — `receiver.Receiver.KnownProviders`
+validates every resolved route, including a client-supplied `event.Route`
+(which bypasses `pipeline.validateRouting`, since that only checks the
+config's own routing), and rejects an unknown name with a 400 *before* the
+`wal.Append`. But a WAL written by an older/misconfigured build could still
+hold such an entry, and there `ReplayPending` must tolerate it: erroring
+would make `pipeline.Build` fail on every restart, permanently wedging the
+daemon over one bad entry. Leaving it pending (visible via
+`wal_unacked_entries`) is the lesser evil.
 
 **Per-provider ack state, not per-event**: each WAL entry tracks which
 providers have acked/dead-lettered it independently (`wal.Entry.Pending`).

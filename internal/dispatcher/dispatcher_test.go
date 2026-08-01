@@ -84,3 +84,38 @@ func TestReplayPendingReenqueuesOnlyPendingProviders(t *testing.T) {
 		t.Errorf("metronome got %v, want 2 entries", ids)
 	}
 }
+
+// A WAL written before the ingress route-validation fix (or by a config
+// that later dropped a provider) can name a provider that no longer
+// exists. ReplayPending must skip it and keep going rather than aborting
+// startup — otherwise one such entry wedges the daemon on every restart.
+func TestReplayPendingSkipsUnknownProviders(t *testing.T) {
+	orb := &fakeEnqueuer{}
+	var logged []string
+	d := dispatcher.New(map[string]dispatcher.Enqueuer{"orb": orb})
+	d.Logger = loggerFunc(func(format string, args ...any) {
+		logged = append(logged, format)
+	})
+
+	entries := []wal.Entry{
+		{Event: testEvent("evt-1"), Pending: []string{"orb", "gone"}},
+		{Event: testEvent("evt-2"), Pending: []string{"gone"}},
+	}
+
+	if err := d.ReplayPending(entries); err != nil {
+		t.Fatalf("replay pending must not error on unknown provider, got %v", err)
+	}
+
+	// The known provider still receives its event...
+	if ids := orb.ids(); len(ids) != 1 || ids[0] != "evt-1" {
+		t.Errorf("orb got %v, want [evt-1]", ids)
+	}
+	// ...and both unknown-provider skips are logged (one per pending entry).
+	if len(logged) != 2 {
+		t.Errorf("logged %d skip messages, want 2", len(logged))
+	}
+}
+
+type loggerFunc func(format string, args ...any)
+
+func (f loggerFunc) Printf(format string, args ...any) { f(format, args...) }

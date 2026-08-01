@@ -159,6 +159,52 @@ func TestNoMatchingRouteRejected(t *testing.T) {
 	}
 }
 
+func TestClientSuppliedRouteToUnknownProviderRejected(t *testing.T) {
+	sink := &fakeSink{failFrom: -1}
+	r := receiver.New(sink, &receiver.StaticRouter{Default: []string{"orb"}})
+	r.Now = func() time.Time { return time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC) }
+	r.KnownProviders = map[string]bool{"orb": true}
+
+	evt := adapter.Event{
+		ID:         "evt-1",
+		CustomerID: "cust_1",
+		EventName:  "api_call",
+		Timestamp:  time.Date(2026, 7, 11, 11, 0, 0, 0, time.UTC),
+		Route:      []string{"nonexistent"},
+	}
+
+	rec := doPost(t, r.Handler(), evt)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if len(sink.appended) != 0 {
+		t.Fatalf("sink.appended = %+v, want none (must reject before durably writing an event routed to an unknown provider)", sink.appended)
+	}
+}
+
+func TestClientSuppliedRouteToKnownProviderAccepted(t *testing.T) {
+	sink := &fakeSink{failFrom: -1}
+	r := receiver.New(sink, &receiver.StaticRouter{Default: []string{"orb"}})
+	r.Now = func() time.Time { return time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC) }
+	r.KnownProviders = map[string]bool{"orb": true, "metronome": true}
+
+	evt := adapter.Event{
+		ID:         "evt-1",
+		CustomerID: "cust_1",
+		EventName:  "api_call",
+		Timestamp:  time.Date(2026, 7, 11, 11, 0, 0, 0, time.UTC),
+		Route:      []string{"metronome"},
+	}
+
+	rec := doPost(t, r.Handler(), evt)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if len(sink.appended) != 1 || sink.appended[0].ID != "evt-1" {
+		t.Fatalf("sink.appended = %+v, want one event evt-1", sink.appended)
+	}
+}
+
 func TestFarFutureTimestampRejected(t *testing.T) {
 	sink := &fakeSink{failFrom: -1}
 	r := newTestReceiver(sink)

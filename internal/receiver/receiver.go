@@ -43,6 +43,16 @@ type Receiver struct {
 	Router  Router
 	Metrics MetricsRecorder  // optional
 	Now     func() time.Time // overridable for tests
+
+	// KnownProviders, when non-nil, gates which providers an event may be
+	// routed to. It matters specifically for client-supplied event.Route
+	// values, which otherwise bypass the startup-time routing-config
+	// validation entirely: an event naming an unknown provider would be
+	// durably WAL-appended and then fail at dispatch, leaving a pending
+	// entry nothing can ever resolve (and, on the next start, wedging
+	// replay). Checking here rejects it as a ValidationError (400) before
+	// it is ever persisted. Nil disables the check.
+	KnownProviders map[string]bool
 }
 
 // New returns a Receiver ready to be mounted as an http.Handler.
@@ -101,6 +111,19 @@ func (r *Receiver) Ingest(events []adapter.Event) error {
 				"event %q (event_name=%q) matches no provider route and no default route is configured",
 				events[i].ID, events[i].EventName,
 			)}
+		}
+		// Same rationale as the empty-route check above: an event routed to
+		// a provider that doesn't exist can never be resolved either, so
+		// reject it before it is durably persisted rather than letting it
+		// wedge the WAL. Only client-supplied Route can reach here unknown;
+		// the router's own output is validated against Providers at startup.
+		if r.KnownProviders != nil {
+			for _, name := range p {
+				if !r.KnownProviders[name] {
+					return &ValidationError{msg: fmt.Sprintf(
+						"event %q routes to unknown provider %q", events[i].ID, name)}
+				}
+			}
 		}
 		providers[i] = p
 	}
